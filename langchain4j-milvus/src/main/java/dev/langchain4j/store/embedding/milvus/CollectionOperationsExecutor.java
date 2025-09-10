@@ -1,5 +1,9 @@
 package dev.langchain4j.store.embedding.milvus;
 
+import static dev.langchain4j.store.embedding.milvus.CollectionRequestBuilder.*;
+import static io.milvus.grpc.DataType.*;
+import static java.lang.String.format;
+
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.common.clientenum.ConsistencyLevelEnum;
 import io.milvus.grpc.FlushResponse;
@@ -17,13 +21,7 @@ import io.milvus.param.dml.SearchParam;
 import io.milvus.param.index.CreateIndexParam;
 import io.milvus.response.QueryResultsWrapper;
 import io.milvus.response.SearchResultsWrapper;
-
 import java.util.List;
-
-import static dev.langchain4j.store.embedding.milvus.CollectionRequestBuilder.*;
-import static dev.langchain4j.store.embedding.milvus.MilvusEmbeddingStore.*;
-import static io.milvus.grpc.DataType.*;
-import static java.lang.String.format;
 
 class CollectionOperationsExecutor {
 
@@ -40,34 +38,34 @@ class CollectionOperationsExecutor {
         return response.getData();
     }
 
-    static void createCollection(MilvusServiceClient milvusClient, String collectionName, int dimension) {
+    static void createCollection(
+            MilvusServiceClient milvusClient, String collectionName, FieldDefinition fieldDefinition, int dimension) {
 
         CreateCollectionParam request = CreateCollectionParam.newBuilder()
                 .withCollectionName(collectionName)
                 .withSchema(CollectionSchemaParam.newBuilder()
                         .addFieldType(FieldType.newBuilder()
-                                .withName(ID_FIELD_NAME)
+                                .withName(fieldDefinition.getIdFieldName())
                                 .withDataType(VarChar)
                                 .withMaxLength(36)
                                 .withPrimaryKey(true)
                                 .withAutoID(false)
                                 .build())
                         .addFieldType(FieldType.newBuilder()
-                                .withName(TEXT_FIELD_NAME)
+                                .withName(fieldDefinition.getTextFieldName())
                                 .withDataType(VarChar)
                                 .withMaxLength(65535)
                                 .build())
                         .addFieldType(FieldType.newBuilder()
-                                .withName(METADATA_FIELD_NAME)
+                                .withName(fieldDefinition.getMetadataFieldName())
                                 .withDataType(JSON)
                                 .build())
                         .addFieldType(FieldType.newBuilder()
-                                .withName(VECTOR_FIELD_NAME)
+                                .withName(fieldDefinition.getVectorFieldName())
                                 .withDataType(FloatVector)
                                 .withDimension(dimension)
                                 .build())
-                        .build()
-                )
+                        .build())
                 .build();
 
         R<RpcStatus> response = milvusClient.createCollection(request);
@@ -80,14 +78,36 @@ class CollectionOperationsExecutor {
         checkResponseNotFailed(response);
     }
 
-    static void createIndex(MilvusServiceClient milvusClient,
-                            String collectionName,
-                            IndexType indexType,
-                            MetricType metricType) {
+    static void createIndex(
+            MilvusServiceClient milvusClient,
+            String collectionName,
+            String vectorFieldName,
+            IndexType indexType,
+            MetricType metricType,
+            String extraParameters) {
 
         CreateIndexParam request = CreateIndexParam.newBuilder()
                 .withCollectionName(collectionName)
-                .withFieldName(VECTOR_FIELD_NAME)
+                .withFieldName(vectorFieldName)
+                .withIndexType(indexType)
+                .withMetricType(metricType)
+                .withExtraParam(extraParameters)
+                .build();
+
+        R<RpcStatus> response = milvusClient.createIndex(request);
+        checkResponseNotFailed(response);
+    }
+
+    static void createIndex(
+            MilvusServiceClient milvusClient,
+            String collectionName,
+            String vectorFieldName,
+            IndexType indexType,
+            MetricType metricType) {
+
+        CreateIndexParam request = CreateIndexParam.newBuilder()
+                .withCollectionName(collectionName)
+                .withFieldName(vectorFieldName)
                 .withIndexType(indexType)
                 .withMetricType(metricType)
                 .build();
@@ -115,20 +135,20 @@ class CollectionOperationsExecutor {
         return new SearchResultsWrapper(response.getData().getResults());
     }
 
-    static QueryResultsWrapper queryForVectors(MilvusServiceClient milvusClient,
-                                               String collectionName,
-                                               List<String> rowIds,
-                                               ConsistencyLevelEnum consistencyLevel) {
-        QueryParam request = buildQueryRequest(collectionName, rowIds, consistencyLevel);
+    static QueryResultsWrapper queryForVectors(
+            MilvusServiceClient milvusClient,
+            String collectionName,
+            FieldDefinition fieldDefinition,
+            List<String> rowIds,
+            ConsistencyLevelEnum consistencyLevel) {
+        QueryParam request = buildQueryRequest(collectionName, fieldDefinition, rowIds, consistencyLevel);
         R<QueryResults> response = milvusClient.query(request);
         checkResponseNotFailed(response);
 
         return new QueryResultsWrapper(response.getData());
     }
 
-    static void removeForVector(MilvusServiceClient milvusClient,
-                                String collectionName,
-                                String expr) {
+    static void removeForVector(MilvusServiceClient milvusClient, String collectionName, String expr) {
         R<MutationResult> response = milvusClient.delete(buildDeleteRequest(collectionName, expr));
         checkResponseNotFailed(response);
     }

@@ -1,3 +1,7 @@
+---
+sidebar_position: 17
+---
+
 # OVHcloud AI Endpoints
 
 - [OVHclous AI Endpoints Documentation](https://labs.ovhcloud.com/en/ai-endpoints/)
@@ -13,7 +17,7 @@
 <dependency>
     <groupId>dev.langchain4j</groupId>
     <artifactId>langchain4j-ovh-ai</artifactId>
-    <version>0.34.0</version>
+    <version>1.4.0-beta10</version>
 </dependency>
 ```
 
@@ -67,9 +71,12 @@ public class OvhAiEmbeddingSimpleExample {
 
         String userQuery = "What is your favourite sport?";
         Embedding queryEmbedding = embeddingModel.embed(userQuery).content();
-        int maxResults = 1;
-        List<EmbeddingMatch<TextSegment>> relevant = embeddingStore.findRelevant(queryEmbedding, maxResults);
-        EmbeddingMatch<TextSegment> embeddingMatch = relevant.get(0);
+        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+                .queryEmbedding(queryEmbedding)
+                .maxResults(1)
+                .build();
+        EmbeddingSearchResult<TextSegment> searchResult = embeddingStore.search(searchRequest);
+        EmbeddingMatch<TextSegment> embeddingMatch = searchResult.matches().get(0);
 
         System.out.println("Question: " + userQuery); // What is your favourite sport?
         System.out.println("Response: " + embeddingMatch.embedded().text()); // I like football.

@@ -13,7 +13,7 @@ sidebar_position: 2
 <dependency>
     <groupId>dev.langchain4j</groupId>
     <artifactId>langchain4j-anthropic</artifactId>
-    <version>0.34.0</version>
+    <version>1.4.0</version>
 </dependency>
 ```
 
@@ -24,13 +24,14 @@ AnthropicChatModel model = AnthropicChatModel.builder()
     .apiKey(System.getenv("ANTHROPIC_API_KEY"))
     .modelName(CLAUDE_3_5_SONNET_20240620)
     .build();
-String answer = model.generate("Say 'Hello World'");
+String answer = model.chat("Say 'Hello World'");
 System.out.println(answer);
 ```
 
 ### Customizing AnthropicChatModel
 ```java
 AnthropicChatModel model = AnthropicChatModel.builder()
+    .httpClientBuilder(...)
     .baseUrl(...)
     .apiKey(...)
     .version(...)
@@ -41,10 +42,20 @@ AnthropicChatModel model = AnthropicChatModel.builder()
     .topK(...)
     .maxTokens(...)
     .stopSequences(...)
+    .toolSpecifications(...)
+    .toolChoice(...)
+    .cacheSystemMessages(...)
+    .cacheTools(...)
+    .thinkingType(...)
+    .thinkingBudgetTokens(...)
+    .returnThinking(...)
+    .sendThinking(...)
     .timeout(...)
     .maxRetries(...)
     .logRequests(...)
     .logResponses(...)
+    .listeners(...)
+    .defaultRequestParameters(...)
     .build();
 ```
 See the description of some of the parameters above [here](https://docs.anthropic.com/claude/reference/messages_post).
@@ -56,15 +67,15 @@ AnthropicStreamingChatModel model = AnthropicStreamingChatModel.builder()
     .modelName(CLAUDE_3_5_SONNET_20240620)
     .build();
 
-model.generate("Say 'Hello World'", new StreamingResponseHandler<AiMessage>() {
+model.chat("Say 'Hello World'", new StreamingChatResponseHandler() {
 
     @Override
-    public void onNext(String token) {
-        // this method is called when a new token is available
+    public void onPartialResponse(String partialResponse) {
+        // this method is called when a new partial response is available. It can consist of one or more tokens.
     }
 
     @Override
-    public void onComplete(Response<AiMessage> response) {
+    public void onCompleteResponse(ChatResponse completeResponse) {
         // this method is called when the model has completed responding
     }
 
@@ -81,9 +92,67 @@ Identical to the `AnthropicChatModel`, see above.
 
 ## Tools
 
-Anthropic supports [tools](/tutorials/tools), but only in a non-streaming mode.
+Anthropic supports [tools](/tutorials/tools) in both streaming and non-streaming mode.
 
 Anthropic documentation on tools can be found [here](https://docs.anthropic.com/claude/docs/tool-use).
+
+## Caching
+
+`AnthropicChatModel` and `AnthropicStreamingChatModel` support caching of system messages and tools.
+Caching is disabled by default.
+It can be enabled by setting the `cacheSystemMessages` and `cacheTools` parameters, respectively.
+
+When enabled,`cache_control` blocks will be added to the last system message and tool, respectively.
+
+To use caching, please set `beta("prompt-caching-2024-07-31")`.
+
+`AnthropicChatModel` and `AnthropicStreamingChatModel` return `AnthropicTokenUsage` in response which
+contains `cacheCreationInputTokens` and `cacheReadInputTokens`.
+
+More info on caching can be found [here](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching).
+
+## Thinking
+
+Both `AnthropicChatModel` and `AnthropicStreamingChatModel` support
+[thinking](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking) feature.
+
+It is controlled by the following parameters:
+- `thinkingType` and `thinkingBudgetTokens`: enable thinking,
+  see more details [here](https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking).
+- `returnThinking`: controls whether to return thinking (if available) inside `AiMessage.thinking()`
+  and whether to invoke `StreamingChatResponseHandler.onPartialThinking()` and `TokenStream.onPartialThinking()`
+  callbacks when using `BedrockStreamingChatModel`.
+  Disabled by default. If enabled, tinking signatures will also be stored and returned inside the `AiMessage.attributes()`.
+- `sendThinking`: controls whether to send thinking and signatures stored in `AiMessage` to the LLM in follow-up requests.
+Enabled by default.
+
+Here is an example of how to configure thinking:
+```java
+ChatModel model = AnthropicChatModel.builder()
+        .apiKey(System.getenv("ANTHROPIC_API_KEY"))
+        .modelName(CLAUDE_3_7_SONNET_20250219)
+        .thinkingType("enabled")
+        .thinkingBudgetTokens(1024)
+        .maxTokens(1024 + 100)
+        .returnThinking(true)
+        .sendThinking(true)
+        .build();
+```
+
+## AnthropicTokenCountEstimator
+
+```java
+TokenCountEstimator tokenCountEstimator = AnthropicTokenCountEstimator.builder()
+        .modelName(CLAUDE_3_OPUS_20240229)
+        .apiKey(System.getenv("ANTHROPIC_API_KEY"))
+        .logRequests(true)
+        .logResponses(true)
+        .build();
+
+List<ChatMessage> messages = List.of(...);
+
+int tokenCount = tokenCountEstimator.estimateTokenCountInMessages(messages);
+```
 
 ## Quarkus
 
@@ -96,7 +165,7 @@ Import Spring Boot starter for Anthropic:
 <dependency>
     <groupId>dev.langchain4j</groupId>
     <artifactId>langchain4j-anthropic-spring-boot-starter</artifactId>
-    <version>0.34.0</version>
+    <version>1.4.0-beta10</version>
 </dependency>
 ```
 

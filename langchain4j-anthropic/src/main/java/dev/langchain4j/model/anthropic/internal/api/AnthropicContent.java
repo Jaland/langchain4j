@@ -23,4 +23,11 @@ public class AnthropicContent {
     public String id;
     public String name;
     public Map<String, Object> input;
+
+    // when type = "thinking"
+    public String thinking;
+    public String signature;
+
+    // when type = "redacted_thinking"
+    public String data;
 }

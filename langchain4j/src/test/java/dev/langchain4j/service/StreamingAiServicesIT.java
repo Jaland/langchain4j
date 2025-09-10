@@ -9,51 +9,50 @@ import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.ChatMemory;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
-import dev.langchain4j.model.azure.AzureOpenAiStreamingChatModel;
-import dev.langchain4j.model.chat.StreamingChatLanguageModel;
-import dev.langchain4j.model.mistralai.MistralAiStreamingChatModel;
+import dev.langchain4j.model.chat.StreamingChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.chat.response.PartialThinking;
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
-import dev.langchain4j.model.output.Response;
 import dev.langchain4j.model.output.TokenUsage;
 import dev.langchain4j.rag.AugmentationResult;
 import dev.langchain4j.rag.RetrievalAugmentor;
 import dev.langchain4j.rag.content.Content;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.stream.Stream;
 
-import static dev.langchain4j.model.mistralai.MistralAiChatModelName.MISTRAL_LARGE_LATEST;
 import static dev.langchain4j.model.openai.OpenAiChatModelName.GPT_4_O_MINI;
 import static dev.langchain4j.model.output.FinishReason.STOP;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
-public class StreamingAiServicesIT {
+@EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+")
+class StreamingAiServicesIT {
 
-    static Stream<StreamingChatLanguageModel> models() {
+    static Stream<StreamingChatModel> models() {
         return Stream.of(
                 OpenAiStreamingChatModel.builder()
                         .baseUrl(System.getenv("OPENAI_BASE_URL"))
                         .apiKey(System.getenv("OPENAI_API_KEY"))
                         .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
-                        .logRequests(true)
-                        .logResponses(true)
-                        .build(),
-                AzureOpenAiStreamingChatModel.builder()
-                        .endpoint(System.getenv("AZURE_OPENAI_ENDPOINT"))
-                        .apiKey(System.getenv("AZURE_OPENAI_KEY"))
-                        .deploymentName("gpt-4o")
-                        .logRequestsAndResponses(true)
-                        .build(),
-                MistralAiStreamingChatModel.builder()
-                        .apiKey(System.getenv("MISTRAL_AI_API_KEY"))
-                        .modelName(MISTRAL_LARGE_LATEST)
+                        .modelName(GPT_4_O_MINI)
                         .logRequests(true)
                         .logResponses(true)
                         .build()
@@ -68,17 +67,19 @@ public class StreamingAiServicesIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_stream_answer(StreamingChatLanguageModel model) throws Exception {
+    void should_stream_answer(StreamingChatModel model) throws Exception {
 
         Assistant assistant = AiServices.create(Assistant.class, model);
 
         StringBuilder answerBuilder = new StringBuilder();
+        Queue<ChatResponse> intermediateResponses = new ConcurrentLinkedQueue<>();
         CompletableFuture<String> futureAnswer = new CompletableFuture<>();
-        CompletableFuture<Response<AiMessage>> futureResponse = new CompletableFuture<>();
+        CompletableFuture<ChatResponse> futureResponse = new CompletableFuture<>();
 
         assistant.chat("What is the capital of Germany?")
-                .onNext(answerBuilder::append)
-                .onComplete(response -> {
+                .onPartialResponse(answerBuilder::append)
+                .onIntermediateResponse(intermediateResponses::add)
+                .onCompleteResponse(response -> {
                     futureAnswer.complete(answerBuilder.toString());
                     futureResponse.complete(response);
                 })
@@ -86,25 +87,25 @@ public class StreamingAiServicesIT {
                 .start();
 
         String answer = futureAnswer.get(30, SECONDS);
-        Response<AiMessage> response = futureResponse.get(30, SECONDS);
+        ChatResponse response = futureResponse.get(30, SECONDS);
 
         assertThat(answer).contains("Berlin");
-        assertThat(response.content().text()).isEqualTo(answer);
+        assertThat(response.aiMessage().text()).isEqualTo(answer);
 
         TokenUsage tokenUsage = response.tokenUsage();
-        if (!(model instanceof AzureOpenAiStreamingChatModel)) { // TODO
-            assertThat(tokenUsage.inputTokenCount()).isGreaterThan(0);
-            assertThat(tokenUsage.outputTokenCount()).isGreaterThan(0);
-            assertThat(tokenUsage.totalTokenCount())
-                    .isEqualTo(tokenUsage.inputTokenCount() + tokenUsage.outputTokenCount());
-        }
+        assertThat(tokenUsage.inputTokenCount()).isPositive();
+        assertThat(tokenUsage.outputTokenCount()).isPositive();
+        assertThat(tokenUsage.totalTokenCount())
+                .isEqualTo(tokenUsage.inputTokenCount() + tokenUsage.outputTokenCount());
 
         assertThat(response.finishReason()).isEqualTo(STOP);
+
+        assertThat(intermediateResponses).isEmpty();
     }
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_callback_with_content(StreamingChatLanguageModel model) throws Exception {
+    void should_callback_with_content(StreamingChatModel model) throws Exception {
 
         List<Content> contents = new ArrayList<>();
         contents.add(Content.from("This is additional content"));
@@ -119,15 +120,14 @@ public class StreamingAiServicesIT {
         when(retrievalAugmentor.augment(any())).thenReturn(result);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .streamingChatLanguageModel(model)
+                .streamingChatModel(model)
                 .retrievalAugmentor(retrievalAugmentor)
                 .build();
 
-        StringBuilder answerBuilder = new StringBuilder();
         CompletableFuture<List<Content>> futureContent = new CompletableFuture<>();
 
         assistant.chat("What is the capital of Germany?")
-                .onNext(answerBuilder::append)
+                .onPartialResponse(ignored -> {})
                 .onRetrieved(futureContent::complete)
                 .ignoreErrors()
                 .start();
@@ -135,62 +135,62 @@ public class StreamingAiServicesIT {
         List<Content> returnedContents = futureContent.get(30, SECONDS);
 
         assertThat(returnedContents)
-        .hasSize(1)
-        .anySatisfy(c -> assertThat(c.textSegment().text()).isEqualTo("This is additional content"));
+                .hasSize(1)
+                .anySatisfy(c -> assertThat(c.textSegment().text()).isEqualTo("This is additional content"));
     }
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_stream_answers_with_memory(StreamingChatLanguageModel model) throws Exception {
+    void should_stream_answers_with_memory(StreamingChatModel model) throws Exception {
 
         ChatMemory chatMemory = MessageWindowChatMemory.withMaxMessages(10);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .streamingChatLanguageModel(model)
+                .streamingChatModel(model)
                 .chatMemory(chatMemory)
                 .build();
 
 
         String firstUserMessage = "Hi, my name is Klaus";
-        CompletableFuture<Response<AiMessage>> firstResultFuture = new CompletableFuture<>();
+        CompletableFuture<ChatResponse> firstResponseFuture = new CompletableFuture<>();
 
         assistant.chat(firstUserMessage)
-                .onNext(System.out::println)
-                .onComplete(firstResultFuture::complete)
-                .onError(firstResultFuture::completeExceptionally)
+                .onPartialResponse(System.out::println)
+                .onCompleteResponse(firstResponseFuture::complete)
+                .onError(firstResponseFuture::completeExceptionally)
                 .start();
 
-        Response<AiMessage> firstResponse = firstResultFuture.get(30, SECONDS);
-        assertThat(firstResponse.content().text()).contains("Klaus");
+        ChatResponse firstResponse = firstResponseFuture.get(30, SECONDS);
+        assertThat(firstResponse.aiMessage().text()).contains("Klaus");
 
 
         String secondUserMessage = "What is my name?";
-        CompletableFuture<Response<AiMessage>> secondResultFuture = new CompletableFuture<>();
+        CompletableFuture<ChatResponse> secondResponseFuture = new CompletableFuture<>();
 
         assistant.chat(secondUserMessage)
-                .onNext(System.out::println)
-                .onComplete(secondResultFuture::complete)
-                .onError(secondResultFuture::completeExceptionally)
+                .onPartialResponse(System.out::println)
+                .onCompleteResponse(secondResponseFuture::complete)
+                .onError(secondResponseFuture::completeExceptionally)
                 .start();
 
-        Response<AiMessage> secondResponse = secondResultFuture.get(30, SECONDS);
-        assertThat(secondResponse.content().text()).contains("Klaus");
+        ChatResponse secondResponse = secondResponseFuture.get(30, SECONDS);
+        assertThat(secondResponse.aiMessage().text()).contains("Klaus");
 
 
         List<ChatMessage> messages = chatMemory.messages();
         assertThat(messages).hasSize(4);
 
         assertThat(messages.get(0)).isInstanceOf(UserMessage.class);
-        assertThat(messages.get(0).text()).isEqualTo(firstUserMessage);
+        assertThat(((UserMessage) messages.get(0)).singleText()).isEqualTo(firstUserMessage);
 
         assertThat(messages.get(1)).isInstanceOf(AiMessage.class);
-        assertThat(messages.get(1)).isEqualTo(firstResponse.content());
+        assertThat(messages.get(1)).isEqualTo(firstResponse.aiMessage());
 
         assertThat(messages.get(2)).isInstanceOf(UserMessage.class);
-        assertThat(messages.get(2).text()).isEqualTo(secondUserMessage);
+        assertThat(((UserMessage) messages.get(2)).singleText()).isEqualTo(secondUserMessage);
 
         assertThat(messages.get(3)).isInstanceOf(AiMessage.class);
-        assertThat(messages.get(3)).isEqualTo(secondResponse.content());
+        assertThat(messages.get(3)).isEqualTo(secondResponse.aiMessage());
     }
 
     static class Calculator {
@@ -203,27 +203,29 @@ public class StreamingAiServicesIT {
 
     @ParameterizedTest
     @MethodSource("models")
-    void should_execute_a_tool_then_stream_answer(StreamingChatLanguageModel model) throws Exception {
+    void should_execute_a_tool_then_stream_answer(StreamingChatModel model) throws Exception {
 
         Calculator calculator = spy(new Calculator());
 
         ChatMemory chatMemory = MessageWindowChatMemory.withMaxMessages(10);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .streamingChatLanguageModel(model)
+                .streamingChatModel(model)
                 .chatMemory(chatMemory)
                 .tools(calculator)
                 .build();
 
         StringBuilder answerBuilder = new StringBuilder();
+        Queue<ChatResponse> intermediateResponses = new ConcurrentLinkedQueue<>();
         CompletableFuture<String> futureAnswer = new CompletableFuture<>();
-        CompletableFuture<Response<AiMessage>> futureResponse = new CompletableFuture<>();
+        CompletableFuture<ChatResponse> futureResponse = new CompletableFuture<>();
 
         String userMessage = "What is the square root of 485906798473894056 in scientific notation?";
 
         assistant.chat(userMessage)
-                .onNext(answerBuilder::append)
-                .onComplete(response -> {
+                .onPartialResponse(answerBuilder::append)
+                .onIntermediateResponse(intermediateResponses::add)
+                .onCompleteResponse(response -> {
                     futureAnswer.complete(answerBuilder.toString());
                     futureResponse.complete(response);
                 })
@@ -231,18 +233,16 @@ public class StreamingAiServicesIT {
                 .start();
 
         String answer = futureAnswer.get(30, SECONDS);
-        Response<AiMessage> response = futureResponse.get(30, SECONDS);
+        ChatResponse response = futureResponse.get(30, SECONDS);
 
         assertThat(answer).contains("6.97");
-        assertThat(response.content().text()).isEqualTo(answer);
+        assertThat(response.aiMessage().text()).isEqualTo(answer);
 
         TokenUsage tokenUsage = response.tokenUsage();
-        if (!(model instanceof AzureOpenAiStreamingChatModel)) { // TODO
-            assertThat(tokenUsage.inputTokenCount()).isGreaterThan(0);
-            assertThat(tokenUsage.outputTokenCount()).isGreaterThan(0);
-            assertThat(tokenUsage.totalTokenCount())
-                    .isEqualTo(tokenUsage.inputTokenCount() + tokenUsage.outputTokenCount());
-        }
+        assertThat(tokenUsage.inputTokenCount()).isPositive();
+        assertThat(tokenUsage.outputTokenCount()).isPositive();
+        assertThat(tokenUsage.totalTokenCount())
+                .isEqualTo(tokenUsage.inputTokenCount() + tokenUsage.outputTokenCount());
 
         assertThat(response.finishReason()).isEqualTo(STOP);
 
@@ -255,15 +255,13 @@ public class StreamingAiServicesIT {
         assertThat(messages).hasSize(4);
 
         assertThat(messages.get(0)).isInstanceOf(UserMessage.class);
-        assertThat(messages.get(0).text()).isEqualTo(userMessage);
+        assertThat(((UserMessage) messages.get(0)).singleText()).isEqualTo(userMessage);
 
         AiMessage aiMessage = (AiMessage) messages.get(1);
         assertThat(aiMessage.text()).isNull();
         assertThat(aiMessage.toolExecutionRequests()).hasSize(1);
         ToolExecutionRequest toolExecutionRequest = aiMessage.toolExecutionRequests().get(0);
-        if (!(model instanceof AzureOpenAiStreamingChatModel)) { // TODO
-            assertThat(toolExecutionRequest.id()).isNotBlank();
-        }
+        assertThat(toolExecutionRequest.id()).isNotBlank();
 
         assertThat(toolExecutionRequest.name()).isEqualTo("squareRoot");
         assertThat(toolExecutionRequest.arguments())
@@ -275,19 +273,22 @@ public class StreamingAiServicesIT {
         assertThat(toolExecutionResultMessage.text()).isEqualTo("6.97070153193991E8");
 
         assertThat(messages.get(3)).isInstanceOf(AiMessage.class);
-        assertThat(messages.get(3).text()).contains("6.97");
+        assertThat(((AiMessage) messages.get(3)).text()).contains("6.97");
+
+        assertThat(intermediateResponses).hasSize(1);
+        assertThat(intermediateResponses.poll().aiMessage()).isEqualTo(aiMessage);
     }
 
     @Test
     void should_execute_multiple_tools_sequentially_then_answer() throws Exception {
 
         // TODO test more models
-        StreamingChatLanguageModel streamingChatModel = OpenAiStreamingChatModel.builder()
+        StreamingChatModel streamingChatModel = OpenAiStreamingChatModel.builder()
                 .baseUrl(System.getenv("OPENAI_BASE_URL"))
                 .apiKey(System.getenv("OPENAI_API_KEY"))
                 .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
                 .modelName(GPT_4_O_MINI)
-                .parallelToolCalls(false)  // called sequentially
+                .parallelToolCalls(false) // to force the model to call tools sequentially
                 .temperature(0.0)
                 .logRequests(true)
                 .logResponses(true)
@@ -298,20 +299,22 @@ public class StreamingAiServicesIT {
         ChatMemory chatMemory = MessageWindowChatMemory.withMaxMessages(10);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .streamingChatLanguageModel(streamingChatModel)
+                .streamingChatModel(streamingChatModel)
                 .chatMemory(chatMemory)
                 .tools(calculator)
                 .build();
 
         StringBuilder answerBuilder = new StringBuilder();
+        Queue<ChatResponse> intermediateResponses = new ConcurrentLinkedQueue<>();
         CompletableFuture<String> futureAnswer = new CompletableFuture<>();
-        CompletableFuture<Response<AiMessage>> futureResponse = new CompletableFuture<>();
+        CompletableFuture<ChatResponse> futureResponse = new CompletableFuture<>();
 
         String userMessage = "What is the square root of 485906798473894056 and 97866249624785 in scientific notation?";
 
         assistant.chat(userMessage)
-                .onNext(answerBuilder::append)
-                .onComplete(response -> {
+                .onPartialResponse(answerBuilder::append)
+                .onIntermediateResponse(intermediateResponses::add)
+                .onCompleteResponse(response -> {
                     futureAnswer.complete(answerBuilder.toString());
                     futureResponse.complete(response);
                 })
@@ -319,14 +322,14 @@ public class StreamingAiServicesIT {
                 .start();
 
         String answer = futureAnswer.get(30, SECONDS);
-        Response<AiMessage> response = futureResponse.get(30, SECONDS);
+        ChatResponse response = futureResponse.get(30, SECONDS);
 
         assertThat(answer).contains("6.97", "9.89");
-        assertThat(response.content().text()).isEqualTo(answer);
+        assertThat(response.aiMessage().text()).isEqualTo(answer);
 
         TokenUsage tokenUsage = response.tokenUsage();
-        assertThat(tokenUsage.inputTokenCount()).isGreaterThan(0); // TODO
-        assertThat(tokenUsage.outputTokenCount()).isGreaterThan(0);
+        assertThat(tokenUsage.inputTokenCount()).isPositive(); // TODO
+        assertThat(tokenUsage.outputTokenCount()).isPositive();
         assertThat(tokenUsage.totalTokenCount())
                 .isEqualTo(tokenUsage.inputTokenCount() + tokenUsage.outputTokenCount());
 
@@ -342,7 +345,7 @@ public class StreamingAiServicesIT {
         assertThat(messages).hasSize(6);
 
         assertThat(messages.get(0)).isInstanceOf(dev.langchain4j.data.message.UserMessage.class);
-        assertThat(messages.get(0).text()).isEqualTo(userMessage);
+        assertThat(((UserMessage) messages.get(0)).singleText()).isEqualTo(userMessage);
 
         AiMessage aiMessage = (AiMessage) messages.get(1);
         assertThat(aiMessage.text()).isNull();
@@ -373,7 +376,11 @@ public class StreamingAiServicesIT {
         assertThat(secondToolExecutionResultMessage.text()).isEqualTo("9892737.215997653");
 
         assertThat(messages.get(5)).isInstanceOf(AiMessage.class);
-        assertThat(messages.get(5).text()).contains("6.97", "9.89");
+        assertThat(((AiMessage) messages.get(5)).text()).contains("6.97", "9.89");
+
+        assertThat(intermediateResponses).hasSize(2);
+        assertThat(intermediateResponses.poll().aiMessage()).isEqualTo(aiMessage);
+        assertThat(intermediateResponses.poll().aiMessage()).isEqualTo(secondAiMessage);
     }
 
     @Test
@@ -382,10 +389,11 @@ public class StreamingAiServicesIT {
         Calculator calculator = spy(new Calculator());
 
         // TODO test more models
-        StreamingChatLanguageModel streamingChatModel = OpenAiStreamingChatModel.builder()
+        StreamingChatModel streamingChatModel = OpenAiStreamingChatModel.builder()
                 .baseUrl(System.getenv("OPENAI_BASE_URL"))
                 .apiKey(System.getenv("OPENAI_API_KEY"))
                 .organizationId(System.getenv("OPENAI_ORGANIZATION_ID"))
+                .modelName(GPT_4_O_MINI)
                 .temperature(0.0)
                 .logRequests(true)
                 .logResponses(true)
@@ -394,20 +402,20 @@ public class StreamingAiServicesIT {
         ChatMemory chatMemory = MessageWindowChatMemory.withMaxMessages(10);
 
         Assistant assistant = AiServices.builder(Assistant.class)
-                .streamingChatLanguageModel(streamingChatModel)
+                .streamingChatModel(streamingChatModel)
                 .chatMemory(chatMemory)
                 .tools(calculator)
                 .build();
 
         StringBuilder answerBuilder = new StringBuilder();
         CompletableFuture<String> futureAnswer = new CompletableFuture<>();
-        CompletableFuture<Response<AiMessage>> futureResponse = new CompletableFuture<>();
+        CompletableFuture<ChatResponse> futureResponse = new CompletableFuture<>();
 
         String userMessage = "What is the square root of 485906798473894056 and 97866249624785 in scientific notation?";
 
         assistant.chat(userMessage)
-                .onNext(answerBuilder::append)
-                .onComplete(response -> {
+                .onPartialResponse(answerBuilder::append)
+                .onCompleteResponse(response -> {
                     futureAnswer.complete(answerBuilder.toString());
                     futureResponse.complete(response);
                 })
@@ -415,14 +423,14 @@ public class StreamingAiServicesIT {
                 .start();
 
         String answer = futureAnswer.get(30, SECONDS);
-        Response<AiMessage> response = futureResponse.get(30, SECONDS);
+        ChatResponse response = futureResponse.get(30, SECONDS);
 
         assertThat(answer).contains("6.97", "9.89");
-        assertThat(response.content().text()).isEqualTo(answer);
+        assertThat(response.aiMessage().text()).isEqualTo(answer);
 
         TokenUsage tokenUsage = response.tokenUsage();
-        assertThat(tokenUsage.inputTokenCount()).isGreaterThan(0); // TODO
-        assertThat(tokenUsage.outputTokenCount()).isGreaterThan(0);
+        assertThat(tokenUsage.inputTokenCount()).isPositive(); // TODO
+        assertThat(tokenUsage.outputTokenCount()).isPositive();
         assertThat(tokenUsage.totalTokenCount())
                 .isEqualTo(tokenUsage.inputTokenCount() + tokenUsage.outputTokenCount());
 
@@ -438,7 +446,7 @@ public class StreamingAiServicesIT {
         assertThat(messages).hasSize(5);
 
         assertThat(messages.get(0)).isInstanceOf(dev.langchain4j.data.message.UserMessage.class);
-        assertThat(messages.get(0).text()).isEqualTo(userMessage);
+        assertThat(((UserMessage) messages.get(0)).singleText()).isEqualTo(userMessage);
 
         AiMessage aiMessage = (AiMessage) messages.get(1);
         assertThat(aiMessage.text()).isNull();
@@ -467,6 +475,61 @@ public class StreamingAiServicesIT {
         assertThat(secondToolExecutionResultMessage.text()).isEqualTo("9892737.215997653");
 
         assertThat(messages.get(4)).isInstanceOf(AiMessage.class);
-        assertThat(messages.get(4).text()).contains("6.97", "9.89");
+        assertThat(((AiMessage) messages.get(4)).text()).contains("6.97", "9.89");
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "DEEPSEEK_API_KEY", matches = ".+")
+    void should_stream_thinking() throws Exception {
+
+        // given
+        boolean returnThinking = true;
+
+        StreamingChatModel streamingChatModel = OpenAiStreamingChatModel.builder()
+                .baseUrl("https://api.deepseek.com/v1")
+                .apiKey(System.getenv("DEEPSEEK_API_KEY"))
+                .modelName("deepseek-reasoner")
+                .returnThinking(returnThinking)
+                .logRequests(true)
+                .logResponses(true)
+                .build();
+
+        Assistant assistant = AiServices.create(Assistant.class, streamingChatModel);
+
+        interface TokenStreamHandler {
+            void onPartialThinking(PartialThinking partialThinking);
+            void onPartialResponse(String partialResponse);
+            void onError(Throwable error);
+            void onCompleteResponse(ChatResponse completeResponse);
+        }
+
+        TokenStreamHandler tokenStreamHandler = mock(TokenStreamHandler.class);
+        CompletableFuture<ChatResponse> futureResponse = new CompletableFuture<>();
+
+        // when
+        assistant.chat("What is the capital of Germany?")
+                .onPartialThinking(partialThinking -> tokenStreamHandler.onPartialThinking(partialThinking))
+                .onPartialResponse(partialResponse -> tokenStreamHandler.onPartialResponse(partialResponse))
+                .onError(error -> {
+                    tokenStreamHandler.onError(error);
+                    futureResponse.completeExceptionally(error);
+                })
+                .onCompleteResponse(completeResponse -> {
+                    tokenStreamHandler.onCompleteResponse(completeResponse);
+                    futureResponse.complete(completeResponse);
+                })
+                .start();
+
+        // then
+        ChatResponse chatResponse = futureResponse.get(60, SECONDS);
+
+        assertThat(chatResponse.aiMessage().text()).contains("Berlin");
+
+        InOrder inOrder = inOrder(tokenStreamHandler);
+        inOrder.verify(tokenStreamHandler, atLeastOnce()).onPartialThinking(any());
+        inOrder.verify(tokenStreamHandler, atLeastOnce()).onPartialResponse(any());
+        inOrder.verify(tokenStreamHandler).onCompleteResponse(any());
+        inOrder.verifyNoMoreInteractions();
+        verifyNoMoreInteractions(tokenStreamHandler);
     }
 }

@@ -1,30 +1,48 @@
 package dev.langchain4j.service;
 
-import dev.langchain4j.exception.IllegalConfigurationException;
-import dev.langchain4j.model.chat.ChatLanguageModel;
+import static dev.langchain4j.data.message.UserMessage.*;
+import static dev.langchain4j.service.AiServicesIT.chatRequest;
+import static dev.langchain4j.service.AiServicesIT.verifyNoMoreInteractionsFor;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
+
+import dev.langchain4j.agent.tool.Tool;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.data.image.Image;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.Content;
+import dev.langchain4j.data.message.ImageContent;
+import dev.langchain4j.data.message.TextContent;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.memory.chat.MessageWindowChatMemory;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.mock.ChatModelMock;
+import dev.langchain4j.model.chat.request.ChatRequest;
+import dev.langchain4j.service.tool.HallucinatedToolNameStrategy;
+import java.util.List;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import static dev.langchain4j.data.message.UserMessage.userMessage;
-import static java.util.Collections.singletonList;
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
-
 @ExtendWith(MockitoExtension.class)
 class AiServicesUserMessageConfigTest {
 
+    private static final Image image = Image.builder()
+            .url("https://en.wikipedia.org/wiki/Llama#/media/File:Llamas,_Vernagt-Stausee,_Italy.jpg")
+            .build();
+    private static final ImageContent imageContent = ImageContent.from(image);
+
     @Spy
-    ChatLanguageModel chatLanguageModel = ChatModelMock.thatAlwaysResponds("Berlin");
+    ChatModel chatModel = ChatModelMock.thatAlwaysResponds("Berlin");
 
     @AfterEach
     void afterEach() {
-        verifyNoMoreInteractions(chatLanguageModel);
+        verifyNoMoreInteractionsFor(chatModel);
     }
 
     interface AiService {
@@ -47,6 +65,24 @@ class AiServicesUserMessageConfigTest {
         @UserMessage("What is the {{it}} of {{country}}?")
         String chat7(@V("it") String it, @V("country") String country);
 
+        @UserMessage("What is the capital of {{arg0}}?")
+        String chat8(String country);
+
+        String chat9(@UserMessage String userMessage, @UserMessage ImageContent image);
+
+        @UserMessage("How many lamas are there in this image?")
+        String chat10(@UserMessage List<ImageContent> images);
+
+        String chat11(@UserMessage ImageContent image1, @UserMessage String text, @UserMessage ImageContent image2);
+
+        String chat12(MyObject myObject);
+
+        String chat13(@UserMessage MyObject myObject);
+
+        String chat14(@UserMessage MyObject myObject, @UserMessage ImageContent image);
+
+        String chat15(@UserMessage String userMessage, @UserMessage Content content);
+
         // illegal configuration
 
         String illegalChat1();
@@ -63,121 +99,265 @@ class AiServicesUserMessageConfigTest {
         @UserMessage("Hello")
         String illegalChat6(@UserMessage String userMessage);
 
-
         // TODO more tests with @UserName, @V, @MemoryId
     }
 
-    @Test
-    void test_user_message_configuration_1() {
+    class MyObject {
 
-        // given
-        AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
-                .build();
+        private final String value;
 
-        // when-then
-        assertThat(aiService.chat1("What is the capital of Germany?"))
-                .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        MyObject(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public String toString() {
+            return value;
+        }
     }
 
     @Test
-    void test_user_message_configuration_2() {
+    void user_message_configuration_1() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
-        assertThat(aiService.chat2("What is the capital of Germany?"))
-                .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        assertThat(aiService.chat1("What is the capital of Germany?")).containsIgnoringCase("Berlin");
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
     }
 
     @Test
-    void test_user_message_configuration_3() {
+    void user_message_configuration_2() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
+                .build();
+
+        // when-then
+        assertThat(aiService.chat2("What is the capital of Germany?")).containsIgnoringCase("Berlin");
+
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_3() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
         assertThat(aiService.chat3("What is the capital of {{country}}?", "Germany"))
                 .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
     }
 
     @Test
-    void test_user_message_configuration_4() {
+    void user_message_configuration_4() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
-        assertThat(aiService.chat4())
-                .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        assertThat(aiService.chat4()).containsIgnoringCase("Berlin");
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
     }
 
     @Test
-    void test_user_message_configuration_5() {
+    void user_message_configuration_5() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
-        assertThat(aiService.chat5("Germany"))
-                .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        assertThat(aiService.chat5("Germany")).containsIgnoringCase("Berlin");
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
     }
 
     @Test
-    void test_user_message_configuration_6() {
+    void user_message_configuration_6() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
-        assertThat(aiService.chat6("Germany"))
-                .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        assertThat(aiService.chat6("Germany")).containsIgnoringCase("Berlin");
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
     }
 
     @Test
-    void test_user_message_configuration_7() {
+    void user_message_configuration_7() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
-        assertThat(aiService.chat7("capital", "Germany"))
-                .containsIgnoringCase("Berlin");
-        verify(chatLanguageModel).generate(singletonList(userMessage("What is the capital of Germany?")));
-        verify(chatLanguageModel).supportedCapabilities();
+        assertThat(aiService.chat7("capital", "Germany")).containsIgnoringCase("Berlin");
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
     }
 
     @Test
-    void test_illegal_user_message_configuration_1() {
+    void user_message_configuration_8() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
+                .build();
+
+        // when-then
+        assertThat(aiService.chat8("Germany")).containsIgnoringCase("Berlin");
+        verify(chatModel).chat(chatRequest("What is the capital of Germany?"));
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_9() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat9("Count the number of lamas in this image", imageContent);
+
+        // then
+        verify(chatModel).chat(ChatRequest.builder()
+                .messages(userMessage(TextContent.from("Count the number of lamas in this image"), imageContent))
+                .build());
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_10() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat10(List.of(imageContent));
+
+        // then
+        verify(chatModel).chat(ChatRequest.builder()
+                .messages(userMessage(TextContent.from("How many lamas are there in this image?"), imageContent))
+                .build());
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_11() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat11(imageContent, "Count the number of lamas in this image", imageContent);
+
+        // then
+        verify(chatModel).chat(ChatRequest.builder()
+                .messages(userMessage(imageContent, TextContent.from("Count the number of lamas in this image"), imageContent))
+                .build());
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_12() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat12(new MyObject("test123"));
+
+        // then
+        verify(chatModel).chat(chatRequest("test123"));
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_13() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat13(new MyObject("test123"));
+
+        // then
+        verify(chatModel).chat(chatRequest("test123"));
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_14() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat14(new MyObject("Count the number of lamas in this image"), imageContent);
+
+        // then
+        verify(chatModel).chat(ChatRequest.builder()
+                .messages(userMessage(TextContent.from("Count the number of lamas in this image"), imageContent))
+                .build());
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void user_message_configuration_15() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
+                .build();
+
+        // when
+        aiService.chat15("Hello!", TextContent.from("How are you?"));
+
+        // then
+        verify(chatModel).chat(ChatRequest.builder()
+                .messages(userMessage(TextContent.from("Hello!"), TextContent.from("How are you?")))
+                .build());
+        verify(chatModel).supportedCapabilities();
+    }
+
+    @Test
+    void illegal_user_message_configuration_1() {
+
+        // given
+        AiService aiService = AiServices.builder(AiService.class)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
@@ -187,11 +367,11 @@ class AiServicesUserMessageConfigTest {
     }
 
     @Test
-    void test_illegal_user_message_configuration_2() {
+    void illegal_user_message_configuration_2() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
@@ -201,41 +381,41 @@ class AiServicesUserMessageConfigTest {
     }
 
     @Test
-    void test_illegal_user_message_configuration_3() {
+    void illegal_user_message_configuration_3() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
         assertThatThrownBy(() -> aiService.illegalChat3("What is the capital of {{it}}?", "Germany"))
                 .isExactlyInstanceOf(IllegalConfigurationException.class)
-                .hasMessage("Parameter 'arg0' of method 'illegalChat3' should be annotated " +
-                        "with @V or @UserMessage or @UserName or @MemoryId");
+                .hasMessage("Parameter 'arg0' of method 'illegalChat3' should be annotated "
+                        + "with @V or @UserMessage or @UserName or @MemoryId");
     }
 
     @Test
-    void test_illegal_user_message_configuration_4() {
+    void illegal_user_message_configuration_4() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
         assertThatThrownBy(() -> aiService.illegalChat4("What is the capital of {{it}}?", "Germany"))
                 .isExactlyInstanceOf(IllegalConfigurationException.class)
-                .hasMessage("Parameter 'arg1' of method 'illegalChat4' should be annotated " +
-                        "with @V or @UserMessage or @UserName or @MemoryId");
+                .hasMessage("Parameter 'arg1' of method 'illegalChat4' should be annotated "
+                        + "with @V or @UserMessage or @UserName or @MemoryId");
     }
 
     @Test
-    void test_illegal_user_message_configuration_5() {
+    void illegal_user_message_configuration_5() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
@@ -245,16 +425,117 @@ class AiServicesUserMessageConfigTest {
     }
 
     @Test
-    void test_illegal_user_message_configuration_6() {
+    void illegal_user_message_configuration_6() {
 
         // given
         AiService aiService = AiServices.builder(AiService.class)
-                .chatLanguageModel(chatLanguageModel)
+                .chatModel(chatModel)
                 .build();
 
         // when-then
         assertThatThrownBy(() -> aiService.illegalChat6("Hello"))
                 .isExactlyInstanceOf(IllegalConfigurationException.class)
-                .hasMessage("Error: The method 'illegalChat6' has multiple @UserMessage annotations. Please use only one.");
+                .hasMessage(
+                        "Error: The method 'illegalChat6' has multiple @UserMessage annotations. Please use only one.");
+    }
+
+    interface AssistantHallucinatedTool {
+        Result<AiMessage> chat(String userMessage);
+    }
+
+    static class HelloWorld {
+
+        @Tool("Say hello")
+        String hello(String name) {
+            return "Hello " + name + "!";
+        }
+    }
+
+    @Test
+    void should_fail_on_hallucinated_tool_execution() {
+
+        ChatModel chatModel = new ChatModelMock(ignore -> AiMessage.from(
+                ToolExecutionRequest.builder().id("id").name("unknown").build()));
+
+        ChatMemory chatMemory = MessageWindowChatMemory.withMaxMessages(10);
+
+        AssistantHallucinatedTool assistant = AiServices.builder(AssistantHallucinatedTool.class)
+                .chatModel(chatModel)
+                .chatMemory(chatMemory)
+                .tools(new HelloWorld())
+                .hallucinatedToolNameStrategy(HallucinatedToolNameStrategy.THROW_EXCEPTION)
+                .build();
+
+        assertThatThrownBy(() -> assistant.chat("hi"))
+                .isExactlyInstanceOf(RuntimeException.class)
+                .hasMessageContaining("unknown");
+
+        validateChatMemory(chatMemory);
+    }
+
+    @Test
+    void should_retry_on_hallucinated_tool_execution() {
+
+        ChatModel chatModel = new ChatModelMock(chatRequest -> {
+            List<ToolExecutionResultMessage> toolResults = chatRequest.messages().stream()
+                    .filter(ToolExecutionResultMessage.class::isInstance)
+                    .map(ToolExecutionResultMessage.class::cast)
+                    .toList();
+            if (toolResults.isEmpty()) {
+                return AiMessage.from(
+                        ToolExecutionRequest.builder().id("id").name("unknown").build());
+            }
+            ToolExecutionResultMessage lastToolResult = toolResults.get(toolResults.size() - 1);
+            String text = lastToolResult.text();
+            if (text.contains("Error")) {
+                // The LLM is supposed to understand the error and retry with the correct tool name
+                return AiMessage.from(ToolExecutionRequest.builder()
+                        .id("id")
+                        .name("hello")
+                        .arguments("{\"arg0\": \"Mario\"}")
+                        .build());
+            }
+            return AiMessage.from(text);
+        });
+
+        ChatMemory chatMemory = MessageWindowChatMemory.withMaxMessages(10);
+
+        AssistantHallucinatedTool assistant = AiServices.builder(AssistantHallucinatedTool.class)
+                .chatModel(chatModel)
+                .chatMemory(chatMemory)
+                .tools(new HelloWorld())
+                .hallucinatedToolNameStrategy(toolExecutionRequest -> ToolExecutionResultMessage.from(
+                        toolExecutionRequest, "Error: there is no tool called " + toolExecutionRequest.name()))
+                .build();
+
+        Result<AiMessage> result = assistant.chat("hi");
+        assertThat(result.content().text()).isEqualTo("Hello Mario!");
+
+        validateChatMemory(chatMemory);
+    }
+
+    private static void validateChatMemory(ChatMemory chatMemory) {
+        List<ChatMessage> messages = chatMemory.messages();
+        Class<?> expectedMessageType = dev.langchain4j.data.message.UserMessage.class;
+        for (ChatMessage message : messages) {
+            assertThat(message).isInstanceOf(expectedMessageType);
+            expectedMessageType = nextExpectedMessageType(message);
+        }
+    }
+
+    private static Class<?> nextExpectedMessageType(ChatMessage message) {
+        if (message instanceof dev.langchain4j.data.message.UserMessage) {
+            return AiMessage.class;
+        } else if (message instanceof AiMessage aiMessage) {
+            if (aiMessage.hasToolExecutionRequests()) {
+                return ToolExecutionResultMessage.class;
+            } else {
+                return dev.langchain4j.data.message.UserMessage.class;
+            }
+        } else if (message instanceof ToolExecutionResultMessage) {
+            return AiMessage.class;
+        }
+        throw new UnsupportedOperationException(
+                "Unsupported message type: " + message.getClass().getName());
     }
 }
